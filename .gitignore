@@ -1,0 +1,15 @@
+.gradle/
+build/
+out/
+target/
+
+.idea/
+*.iml
+
+*.log
+*.tmp
+
+.env
+application-local.properties
+
+bin/
