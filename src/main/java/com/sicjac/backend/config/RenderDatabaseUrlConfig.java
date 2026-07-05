@@ -6,40 +6,63 @@ import java.nio.charset.StandardCharsets;
 
 public final class RenderDatabaseUrlConfig {
 
+    private static final int POSTGRESQL_DEFAULT_PORT = 5432;
+
     private RenderDatabaseUrlConfig() {
     }
 
     public static void apply() {
-        String databaseUrl = System.getenv("DATABASE_URL");
-        if (isBlank(databaseUrl) || hasSpringConfigured("spring.datasource.url", "SPRING_DATASOURCE_URL")) {
+        String renderDatabaseUrl = System.getenv("DATABASE_URL");
+        String databaseUrl = firstPresent(
+                System.getenv("SPRING_DATASOURCE_URL"),
+                renderDatabaseUrl,
+                System.getenv("DB_URL"));
+
+        if (isBlank(databaseUrl) || !isPostgresUrl(databaseUrl)) {
             return;
         }
 
-        URI uri = URI.create(databaseUrl.replaceFirst("^postgres(?:ql)?://", "postgresql://"));
-        String jdbcUrl = toJdbcUrl(uri);
-        System.setProperty("spring.datasource.url", jdbcUrl);
+        URI uri = toUri(databaseUrl);
+        System.setProperty("spring.datasource.url", toJdbcUrl(uri));
 
         String[] credentials = parseCredentials(uri.getRawUserInfo());
-        if (credentials[0] != null && !hasSpringConfigured("spring.datasource.username", "SPRING_DATASOURCE_USERNAME")) {
-            System.setProperty("spring.datasource.username", credentials[0]);
+        String[] renderCredentials = parseCredentialsFromUrl(renderDatabaseUrl);
+        String username = firstPresent(
+                System.getenv("SPRING_DATASOURCE_USERNAME"),
+                credentials[0],
+                renderCredentials[0],
+                System.getenv("DB_USER"));
+        String password = firstPresent(
+                System.getenv("SPRING_DATASOURCE_PASSWORD"),
+                credentials[1],
+                renderCredentials[1],
+                System.getenv("DB_PASSWORD"));
+
+        if (!isBlank(username)) {
+            System.setProperty("spring.datasource.username", username);
         }
-        if (credentials[1] != null && !hasSpringConfigured("spring.datasource.password", "SPRING_DATASOURCE_PASSWORD")) {
-            System.setProperty("spring.datasource.password", credentials[1]);
+        if (!isBlank(password)) {
+            System.setProperty("spring.datasource.password", password);
         }
+
+        validateRequiredConfiguration();
     }
 
     private static String toJdbcUrl(URI uri) {
         StringBuilder jdbcUrl = new StringBuilder("jdbc:postgresql://")
                 .append(uri.getHost());
 
-        if (uri.getPort() != -1) {
-            jdbcUrl.append(':').append(uri.getPort());
-        }
+        int port = uri.getPort() != -1 ? uri.getPort() : POSTGRESQL_DEFAULT_PORT;
+        jdbcUrl.append(':').append(port);
 
         jdbcUrl.append(uri.getRawPath());
 
-        if (!isBlank(uri.getRawQuery())) {
+        if (isBlank(uri.getRawQuery())) {
+            jdbcUrl.append("?sslmode=require");
+        } else if (uri.getRawQuery().contains("sslmode=")) {
             jdbcUrl.append('?').append(uri.getRawQuery());
+        } else {
+            jdbcUrl.append('?').append(uri.getRawQuery()).append("&sslmode=require");
         }
 
         return jdbcUrl.toString();
@@ -56,13 +79,46 @@ public final class RenderDatabaseUrlConfig {
         return new String[] { username, password };
     }
 
+    private static String[] parseCredentialsFromUrl(String databaseUrl) {
+        if (isBlank(databaseUrl) || !isPostgresUrl(databaseUrl)) {
+            return new String[] { null, null };
+        }
+
+        return parseCredentials(toUri(databaseUrl).getRawUserInfo());
+    }
+
     private static String decode(String value) {
         return URLDecoder.decode(value, StandardCharsets.UTF_8);
     }
 
-    private static boolean hasSpringConfigured(String systemProperty, String springEnv) {
-        return !isBlank(System.getProperty(systemProperty))
-                || !isBlank(System.getenv(springEnv));
+    private static URI toUri(String databaseUrl) {
+        return URI.create(databaseUrl
+                .replaceFirst("^jdbc:postgresql://", "postgresql://")
+                .replaceFirst("^postgres://", "postgresql://"));
+    }
+
+    private static boolean isPostgresUrl(String value) {
+        return value.startsWith("jdbc:postgresql://")
+                || value.startsWith("postgresql://")
+                || value.startsWith("postgres://");
+    }
+
+    private static String firstPresent(String... values) {
+        for (String value : values) {
+            if (!isBlank(value)) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static void validateRequiredConfiguration() {
+        if (isBlank(System.getProperty("spring.datasource.username"))
+                || isBlank(System.getProperty("spring.datasource.password"))) {
+            throw new IllegalStateException(
+                    "PostgreSQL credentials are missing. Configure DATABASE_URL with user/password, "
+                            + "or set SPRING_DATASOURCE_USERNAME and SPRING_DATASOURCE_PASSWORD in Render.");
+        }
     }
 
     private static boolean isBlank(String value) {
